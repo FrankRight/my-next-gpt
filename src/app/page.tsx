@@ -22,6 +22,7 @@ import { PopoverContent } from "@radix-ui/react-popover";
 import Pusher from "pusher-js";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { fetchEventSource } from "@microsoft/fetch-event-source";
 
 const DEPLOYMENT_ID = process.env.NEXT_PUBLIC_DEPLOYMENT_ID;
 
@@ -33,6 +34,7 @@ export default function Home() {
   const [outputMessage, setOutputMessage] = useState("");
   const [userMessage, setUserMessage] = useState("");
   const [openPopover, setOpenPopover] = useState(false);
+  const [callId, setCallId] = useState("");
 
   // Get Deployment
   const { data: deployment, isLoading: isLoadingDeployment } = useQuery(
@@ -96,54 +98,57 @@ export default function Home() {
     }
   }, [deployment]);
 
-  const setupPusher = (uuid: string) => {
-    const pusher_app_key = process.env.NEXT_PUBLIC_PUSHER_APP_KEY;
-    const pusher_app_cluster = process.env.NEXT_PUBLIC_PUSHER_APP_CLUSTER;
+  useEffect(() => {
+    const fetchData = async () => {
+      if (callId && callId != "") {
+        await fetchEventSource(`http://localhost:3039/events/${callId}`, {
+          method: "GET",
+          headers: {
+            Accept: "text/event-stream",
+          },
+          onopen(res): any {
+            if (res.ok && res.status === 200) {
+              console.log("Connection made ", res);
+            } else if (
+              res.status >= 400 &&
+              res.status < 500 &&
+              res.status !== 429
+            ) {
+              console.log("Client side error ", res);
+            }
+          },
+          onmessage(event) {
+            const parsedData = JSON.parse(event.data);
 
-    console.log(pusher_app_key, pusher_app_cluster);
+            if (parsedData.completed) {
+              setIsLoading(false);
+            } else {
+              setProgressBarMessage(parsedData.payload);
+              setIsLoading(true);
+            }
+            mutateThreads();
+            mutateThread();
+          },
+          onclose() {
+            console.log("Connection closed by the server");
+          },
+          onerror(err) {
+            console.log("There was an error from server", err);
+            setIsLoading(false);
+          },
+        });
+      }
+    };
 
-    if (!pusher_app_key || !pusher_app_cluster) {
-      return;
-    }
-
-    const pusher = new Pusher(pusher_app_key, {
-      cluster: pusher_app_cluster,
-    });
-
-    const channel = pusher.subscribe(uuid);
-
-    channel.bind("agent:scheduled", () => {
-      console.log("Message submitted");
-      setIsLoading(true);
-    });
-
-    channel.bind("agent:status", (data: string) => {
-      setProgressBarMessage(data);
-    });
-
-    channel.bind("agent:completed", () => {
-      console.log("Message received! - Send Completed nofitication!");
-    });
-
-    channel.bind("agent:output", (data: string) => {
-      setOutputMessage(data);
-      setIsLoading(false);
-
-      // mutateCurrentThread();
-      // mutate(`/deploy/chat/${params.chatbotId}/threads/${selectedThreadId}`);
-      // mutateThreads([...(deployedChatThreads as Thread[])]);
-
-      // Clean up
-      channel.unbind_all();
-      pusher.disconnect();
-    });
-  };
+    fetchData();
+  }, [callId]);
 
   const generateThreadName = (_message: string) => {
     triggerGenerateName({ value: _message } as any).then((res) => {
       if (res.success) {
+        // Update name
         triggerUpdateName({
-          ...thread,
+          ...thread?.data,
           name: res.data.replace(/["\\]/g, ""),
         }).then((response) => {
           if (response.success) {
@@ -153,7 +158,6 @@ export default function Home() {
           }
         });
       }
-      // Update name
     });
   };
 
@@ -164,7 +168,6 @@ export default function Home() {
         env: deployment?.data?.environment,
       } as any);
 
-      // console.log(result);
       if (result.success) {
         const data = result.data;
         setSelectedId(data.ID);
@@ -181,34 +184,37 @@ export default function Home() {
 
   const runThread = () => {
     triggerRun({ agent_id: agentId } as any).then((response) => {
-      console.log("Run Response!", response);
-
       let call_id = response.data.call_id;
-      call_id = call_id.replace(/-/g, "");
 
-      console.log(call_id);
-
-      setupPusher(call_id);
+      setCallId(call_id);
     });
   };
 
   const addMessageToThread = (message: string) => {
     const addMessage = () => {
-      setIsLoading(true);
-      triggerMessage({ role: "user", content: message } as any).then((res) => {
-        setUserMessage("");
-        generateThreadName(message);
-        mutateThread();
+      triggerMessage({ role: "user", content: message } as any).then(
+        (res: any) => {
+          setUserMessage("");
+          setIsLoading(true);
 
-        runThread();
-      });
+          if (!thread?.data?.name) {
+            generateThreadName(message);
+          }
+
+          runThread();
+        }
+      );
     };
 
     if (!selectedThreadId) {
       // Create Thread
-      createThread().then(() => {
-        console.log("Thread Created!! Now Send Message!");
-        addMessage();
+      createThread().then((res) => {
+        // console.log("Thread Created!! Now Send Message!");
+        // console.log(res);
+
+        if (res) {
+          setTimeout(addMessage, 500);
+        }
       });
     } else {
       addMessage();
@@ -218,8 +224,6 @@ export default function Home() {
   const onEnterInput = (event: any) => {
     if (event.key === "Enter") {
       const messageToSend = event.target.value;
-      setIsLoading;
-
       addMessageToThread(messageToSend);
     }
   };
@@ -248,15 +252,15 @@ export default function Home() {
             <Button
               variant="ghost"
               onClick={createThread}
-              className="flex gap-2 bg-slate-100 hover:bg-slate-200 text-sm"
+              className="flex gap-2 bg-slate-200 hover:bg-black hover:text-white text-sm"
             >
               <Plus className="w-4 h-4" />
               <span className="text-sm">New Chat</span>
             </Button>
             <div className="text-sm py-5">
-              <h4 className="text-gray-500 px-3 text-xs">Chats</h4>
+              <h4 className="text-gray-500 px-3 text-xs">Recent Chats</h4>
 
-              <div className="mt-2">
+              <div className="mt-3">
                 {threads?.data.map((thread: Thread) => {
                   return (
                     <div
@@ -268,7 +272,13 @@ export default function Home() {
                           : "hover:bg-slate-100"
                       } flex justify-between group`}
                     >
-                      <span>
+                      <span
+                        className={`overflow-hidden flex ${
+                          selectedThreadId === thread?.ID
+                            ? "w-[80%] truncate"
+                            : "w-[98%] truncate"
+                        }`}
+                      >
                         {thread?.name == "" ? "new chat" : thread?.name}
                       </span>
 
@@ -310,32 +320,34 @@ export default function Home() {
         <ResizablePanel defaultSize={85} maxSize={85} minSize={80}>
           <div className="flex flex-col w-full h-[100vh] overflow-auto p-4">
             <div className="h-[calc(100vh-100px)] overflow-auto">
-              <div className="container max-w-4xl mx-auto p-4 flex flex-col gap-4">
+              <div className="container max-w-4xl mx-auto p-4 flex flex-col">
                 {thread?.data.messages.map((message: Message) => {
                   return (
-                    <div key={message?.ID} className="py-2">
-                      <div className="w-full text-sm">
-                        {message?.role === "user" ? (
-                          <div className="flex gap-2 items-center">
-                            <span className="p-[5px] border rounded-full">
-                              <User className="w-4 h-4 text-gray-500" />
-                            </span>
-                            <span className="font-semibold">User</span>
+                    <div key={message?.ID} className="">
+                      {message?.content && (
+                        <div className="py-2 w-full text-sm mb-2">
+                          <div>
+                            {message?.role === "user" ? (
+                              <div className="flex gap-2 items-center">
+                                <span className="p-[5px] border rounded-full">
+                                  <User className="w-4 h-4 text-gray-500" />
+                                </span>
+                                <span className="font-semibold">User</span>
+                              </div>
+                            ) : (
+                              <div className="flex gap-2 items-center">
+                                <span className="p-[5px] border rounded-full">
+                                  <Bot className="w-4 h-4 text-gray-500" />
+                                </span>
+                                <span className="font-semibold">Bot</span>
+                              </div>
+                            )}
                           </div>
-                        ) : (
-                          <div className="flex gap-2 items-center">
-                            <span className="p-[5px] border rounded-full">
-                              <Bot className="w-4 h-4 text-gray-500" />
-                            </span>
-                            <span className="font-semibold">Bot</span>
-                          </div>
-                        )}
-                      </div>
-                      <div className="pl-9 text-sm">
-                        {message?.content || (
-                          <span className="text-gray-500">No Response</span>
-                        )}
-                      </div>
+
+                          <div className="pl-9 my-2">{message?.content}</div>
+                          {/* <div></div> */}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -350,7 +362,7 @@ export default function Home() {
                         <span className="font-semibold">Bot</span>
                       </div>
                       <span className="pl-9 text-sm">
-                        Processing ...{progressBarmessage}
+                        Processing.. {progressBarmessage}
                       </span>
                     </div>
                   )}
